@@ -330,15 +330,16 @@ fun ReactionPointsHUD(
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(20.dp))
-                    .background(Color(0xCC0F172A))
-                    .border(1.dp, Color(0x3338BDF8), RoundedCornerShape(20.dp))
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .background(Color(0xDD0F172A))
+                    .border(1.5.dp, Color(0xFF38BDF8), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 18.dp, vertical = 8.dp)
             ) {
                 Text(
-                    text = "🏀 Regla: Bota el balón contra el suelo y toca el número para puntuar",
-                    color = Color(0xFFE2E8F0),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold
+                    text = "🏀 BOTA EL BALÓN Y TOCA LOS PUNTOS EN ORDEN (1 ➔ 2 ➔ 3)",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 0.5.sp
                 )
             }
         }
