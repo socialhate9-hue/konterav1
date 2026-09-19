@@ -65,18 +65,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.delay
-
-/**
- * Estados de la detección rigurosa de posición y distancia del jugador.
- */
-private enum class BodyPositionState {
-    NO_PERSON,
-    TOO_CLOSE,
-    TOO_FAR,
-    INCOMPLETE_BODY,
-    READY
-}
 
 /**
  * Overlay a pantalla completa sobre la cámara activa (sin marcos cerrados ni neón).
@@ -84,21 +72,14 @@ private enum class BodyPositionState {
  * Flujo:
  * 1. MÓVIL EN VERTICAL:
  *    - Pantalla completa oscura con el icono de rotar pantalla + textos concisos.
- *    - Botón de salir (X) situado más abajo para no solaparse con el contador.
+ *    - Botón de salir (X) arriba a la derecha.
  *
- * 2. MÓVIL EN HORIZONTAL (PRE-PULSACIÓN):
+ * 2. MÓVIL EN HORIZONTAL:
  *    - Dos casillas:
  *      1. "Gira pantalla": activada en verde (✓).
  *      2. "Apóyalo": se activa en verde (✓) mediante acelerómetro cuando el móvil está quieto.
  *    - Botón "¡JUGAR AHORA!" en azul deportivo: DESHABILITADO hasta que ambas casillas estén en check.
- *    - Al pulsar el botón cuando ambas están en check: pasa al paso 3.
- *
- * 3. TRAS PULSAR EL BOTÓN (VERIFICACIÓN RIGUROSA DE 2M Y CUERPO ENTERO):
- *    - Muestra la 3ª casilla: "Aléjate 2m - Cuerpo entero".
- *    - Detección rigurosa de esqueleto: requiere cabeza, hombros, caderas y tren inferior dentro del encuadre
- *      y a distancia óptima (~2m, ni pegado ni excesivamente lejos).
- *    - Cuando está en posición correcta durante 800ms: la casilla se pone en verde brillante (✓),
- *      se confirma y arranca la cuenta atrás (3, 2, 1) para empezar el juego.
+ *    - Al pulsar el botón: arranca de inmediato la cuenta atrás de 5 segundos con voz.
  */
 @OptIn(ExperimentalAnimationApi::class)
 @Composable
@@ -118,16 +99,6 @@ fun PlayNowCountdownOverlay(
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val context = LocalContext.current
-
-    // Estado interno: ¿el usuario ya pulsó el botón y estamos comprobando que se coloque a 2m?
-    var isAwaitingDistanceVerification by remember { mutableStateOf(false) }
-
-    // Si se rota a vertical, reseteamos la espera de distancia
-    LaunchedEffect(isLandscape) {
-        if (!isLandscape) {
-            isAwaitingDistanceVerification = false
-        }
-    }
 
     // 1. Detección de estabilidad del teléfono (Casilla 2: "Apóyalo")
     var isPhoneStill by remember { mutableStateOf(false) }
@@ -197,58 +168,6 @@ fun PlayNowCountdownOverlay(
         }
     }
 
-    // 2. Detección rigurosa de cuerpo entero a 2 metros
-    val bodyState = remember(skeleton, isPlayerTooClose) {
-        if (skeleton == null || skeleton.landmarks.isEmpty()) {
-            BodyPositionState.NO_PERSON
-        } else {
-            val lShoulder = skeleton.landmarks.getOrNull(11)
-            val rShoulder = skeleton.landmarks.getOrNull(12)
-            val hasShoulders = lShoulder != null && rShoulder != null &&
-                    lShoulder.visibility > 0.40f && rShoulder.visibility > 0.40f
-
-            val lHip = skeleton.landmarks.getOrNull(23)
-            val rHip = skeleton.landmarks.getOrNull(24)
-            val hasHips = (lHip != null && lHip.visibility > 0.35f) ||
-                    (rHip != null && rHip.visibility > 0.35f)
-
-            val lKnee = skeleton.landmarks.getOrNull(25)
-            val rKnee = skeleton.landmarks.getOrNull(26)
-            val lAnkle = skeleton.landmarks.getOrNull(27)
-            val rAnkle = skeleton.landmarks.getOrNull(28)
-            val hasLowerBody = (lKnee != null && lKnee.visibility > 0.28f) ||
-                    (rKnee != null && rKnee.visibility > 0.28f) ||
-                    (lAnkle != null && lAnkle.visibility > 0.22f) ||
-                    (rAnkle != null && rAnkle.visibility > 0.22f)
-
-            val shoulderDist = if (hasShoulders) {
-                kotlin.math.hypot(lShoulder!!.x - rShoulder!!.x, lShoulder.y - rShoulder.y)
-            } else 0f
-
-            if (isPlayerTooClose || (hasShoulders && shoulderDist > 0.27f)) {
-                BodyPositionState.TOO_CLOSE
-            } else if (hasShoulders && shoulderDist < 0.075f) {
-                BodyPositionState.TOO_FAR
-            } else if (!hasShoulders || !hasHips || !hasLowerBody) {
-                BodyPositionState.INCOMPLETE_BODY
-            } else {
-                BodyPositionState.READY
-            }
-        }
-    }
-
-    // Temporizador de estabilidad: una vez en posición correcta durante 800ms, lanza el juego
-    LaunchedEffect(isAwaitingDistanceVerification, bodyState) {
-        if (isAwaitingDistanceVerification && bodyState == BodyPositionState.READY) {
-            delay(800)
-            if (bodyState == BodyPositionState.READY) {
-                VoiceCoachManager.speak("¡Listo!", pitch = 1.3f, rate = 1.25f)
-                isAwaitingDistanceVerification = false
-                onPlayNow()
-            }
-        }
-    }
-
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -305,17 +224,15 @@ fun PlayNowCountdownOverlay(
                     .background(Color(0xC4000000))
                     .testTag("awaiting_play_start_overlay")
             ) {
-                // Botón de salir / cerrar (X) ubicado por debajo del contador superior
-                val topPadding = if (!isLandscape) 78.dp else 60.dp
+                // Botón de salir / cerrar (X) arriba a la derecha
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(top = topPadding, end = 20.dp)
+                        .padding(top = 20.dp, end = 20.dp)
                         .size(42.dp)
                         .clip(CircleShape)
                         .background(Color(0x33FFFFFF))
                         .clickable {
-                            isAwaitingDistanceVerification = false
                             onExitToMain()
                         }
                         .testTag("exit_play_now_to_main_button"),
@@ -389,10 +306,11 @@ fun PlayNowCountdownOverlay(
                             textAlign = TextAlign.Center
                         )
                     }
-                } else if (!isAwaitingDistanceVerification) {
+                } else {
                     // ==========================================
-                    // PASO 2: MÓVIL EN HORIZONTAL (PRE-PULSACIÓN)
+                    // PASO 2: MÓVIL EN HORIZONTAL
                     // 2 casillas + botón bloqueado hasta cumplir ambas
+                    // Al pulsar -> Directo a onPlayNow() (cuenta atrás 5 seg)
                     // ==========================================
                     val isReadyToPress = isLandscape && isPhoneStill
 
@@ -482,12 +400,7 @@ fun PlayNowCountdownOverlay(
                                     .clip(RoundedCornerShape(50))
                                     .background(buttonGradient)
                                     .clickable {
-                                        VoiceCoachManager.speak(
-                                            "¡Aléjate a tu posición!",
-                                            pitch = 1.22f,
-                                            rate = 1.2f
-                                        )
-                                        isAwaitingDistanceVerification = true
+                                        onPlayNow()
                                     }
                                     .padding(horizontal = 38.dp, vertical = 18.dp)
                                     .testTag("play_now_button"),
@@ -531,77 +444,6 @@ fun PlayNowCountdownOverlay(
                                 )
                             }
                         }
-                    }
-                } else {
-                    // ==========================================
-                    // PASO 3: TRAS PULSAR EL BOTÓN
-                    // Verificación rigurosa de 2 metros y cuerpo entero
-                    // ==========================================
-                    val isBodyReady = bodyState == BodyPositionState.READY
-
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 24.dp, vertical = 20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = "COLÓCATE A 2 METROS",
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = 1.5.sp,
-                            color = Color.White,
-                            textAlign = TextAlign.Center
-                        )
-
-                        Spacer(modifier = Modifier.height(20.dp))
-
-                        // Casilla grande de los 2 metros
-                        FloatingCheckItem(
-                            icon = Icons.Default.Person,
-                            title = "Aléjate 2m",
-                            subtitle = if (isBodyReady) "¡En posición!" else "Cuerpo entero",
-                            isActivated = isBodyReady,
-                            tag = "step_box_distance",
-                            customWidth = 150.dp
-                        )
-
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        // Mensaje de estado dinámico riguroso
-                        val statusText = when (bodyState) {
-                            BodyPositionState.NO_PERSON -> "Ponte delante de la cámara"
-                            BodyPositionState.TOO_CLOSE -> "Demasiado cerca, da un paso atrás"
-                            BodyPositionState.TOO_FAR -> "Demasiado lejos, acércate un poco"
-                            BodyPositionState.INCOMPLETE_BODY -> "Se debe ver el cuerpo entero (cabeza a pies)"
-                            BodyPositionState.READY -> "¡Posición perfecta! Mantente ahí..."
-                        }
-
-                        Text(
-                            text = statusText,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (isBodyReady) Color(0xFF86EFAC) else Color(0xFFCBD5E1),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(horizontal = 16.dp)
-                        )
-
-                        Spacer(modifier = Modifier.height(22.dp))
-
-                        // Botón de salto de seguridad si la habitación es muy pequeña o iluminación difícil
-                        Text(
-                            text = "¿Listo? Toca aquí para empezar ya",
-                            fontSize = 12.sp,
-                            color = Color(0x88FFFFFF),
-                            modifier = Modifier
-                                .clickable {
-                                    isAwaitingDistanceVerification = false
-                                    onPlayNow()
-                                }
-                                .padding(8.dp)
-                                .testTag("force_start_play_button")
-                        )
                     }
                 }
             }

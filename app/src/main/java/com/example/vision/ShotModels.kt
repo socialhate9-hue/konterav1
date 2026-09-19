@@ -266,7 +266,9 @@ enum class PlayerPositionViolation {
     TOO_CLOSE,
     TOO_FAR,
     OFF_CENTER_LEFT,
-    OFF_CENTER_RIGHT
+    OFF_CENTER_RIGHT,
+    NO_PLAYER,
+    INCOMPLETE_BODY
 }
 
 data class ReactionPoint(

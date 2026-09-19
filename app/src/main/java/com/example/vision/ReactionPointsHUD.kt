@@ -157,8 +157,9 @@ fun ReactionPointsHUD(
     val remaining = state.reactionTimerRemainingSec
     val timerFormatted = String.format("%02d:%02d", remaining / 60, remaining % 60)
 
-    // Control de distancia: exclusivamente el estado de proximidad excesiva (< 1 metro)
-    val isTooClose = state.isReactionPlayerTooClose
+    // Control de posición y distancia: si hay cualquier infracción (lejos, cerca, descentrado, fuera de plano)
+    val positionViolation = state.reactionPositionViolation
+    val hasPositionViolation = positionViolation != null || state.isReactionPlayerTooClose
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val screenWidth = maxWidth
@@ -295,16 +296,16 @@ fun ReactionPointsHUD(
             }
         }
 
-        // 1b. PANTALLA COMPLETA EN ROJO TRANSLÚCIDO SI ESTÁ DEMASIADO CERCA (Puntuación bloqueada)
+        // 1b. PANTALLA COMPLETA EN ROJO TRANSLÚCIDO SI LA POSICIÓN/DISTANCIA ES INCORRECTA (Puntuación bloqueada)
         AnimatedVisibility(
-            visible = isTooClose && state.isReactionTimerRunning && !state.isReactionSessionFinished,
+            visible = hasPositionViolation && ((state.isReactionTimerRunning && !state.isReactionSessionFinished) || state.playStartCountdownSec != null),
             enter = fadeIn(tween(150)),
             exit = fadeOut(tween(200)),
             modifier = Modifier
                 .fillMaxSize()
                 .zIndex(100f)
         ) {
-            ReactionPositionWarningFullScreenOverlay()
+            ReactionPositionWarningFullScreenOverlay(violation = positionViolation ?: PlayerPositionViolation.TOO_CLOSE)
         }
 
         // 1c. AVISO EN PANTALLA SI INTENTA TOCAR SIN BOTAR PRIMERO
@@ -1394,11 +1395,13 @@ fun ReactionDistanceLiveBanner(
  * permitiendo ver perfectamente la cámara y al jugador mientras se muestra el mensaje de advertencia.
  */
 @Composable
-private fun ReactionPositionWarningFullScreenOverlay() {
+private fun ReactionPositionWarningFullScreenOverlay(
+    violation: PlayerPositionViolation?
+) {
     val infiniteTransition = rememberInfiniteTransition(label = "pulse_red_overlay")
     val overlayAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.28f,
-        targetValue = 0.38f,
+        initialValue = 0.32f,
+        targetValue = 0.45f,
         animationSpec = infiniteRepeatable(
             animation = tween(550, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
@@ -1414,6 +1417,16 @@ private fun ReactionPositionWarningFullScreenOverlay() {
         ),
         label = "icon_scale"
     )
+
+    val (title, subtitle) = when (violation) {
+        PlayerPositionViolation.NO_PLAYER -> Pair("¡VUELVE A TU POSICIÓN!", "👤 COLÓCATE FRENTE A LA CÁMARA")
+        PlayerPositionViolation.INCOMPLETE_BODY -> Pair("¡ALÉJATE UN PASO!", "🦵 DEBEN VERSE TUS PIERNAS Y BRAZOS")
+        PlayerPositionViolation.TOO_CLOSE -> Pair("¡DEMASIADO CERCA!", "⬅️ DA UN PASO ATRÁS")
+        PlayerPositionViolation.TOO_FAR -> Pair("¡DEMASIADO LEJOS!", "➡️ DA UN PASO ADELANTE")
+        PlayerPositionViolation.OFF_CENTER_LEFT -> Pair("¡CÉNTRATE!", "➡️ MUÉVETE A LA DERECHA")
+        PlayerPositionViolation.OFF_CENTER_RIGHT -> Pair("¡CÉNTRATE!", "⬅️ MUÉVETE A LA IZQUIERDA")
+        null -> Pair("¡POSICIÓN INCORRECTA!", "COLÓCATE FRENTE A LA CÁMARA")
+    }
 
     Box(
         modifier = Modifier
@@ -1440,7 +1453,7 @@ private fun ReactionPositionWarningFullScreenOverlay() {
             Spacer(modifier = Modifier.height(14.dp))
 
             Text(
-                text = "¡DEMASIADO CERCA!",
+                text = title,
                 fontSize = 32.sp,
                 fontWeight = FontWeight.Black,
                 color = Color.White,
@@ -1452,7 +1465,7 @@ private fun ReactionPositionWarningFullScreenOverlay() {
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "⬅️ DA UN PASO ATRÁS",
+                text = subtitle,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.ExtraBold,
                 color = Color(0xFFFFEB3B),
