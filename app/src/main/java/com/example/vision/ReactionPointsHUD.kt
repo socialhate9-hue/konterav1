@@ -269,33 +269,6 @@ fun ReactionPointsHUD(
             }
         }
 
-        // 1a. BADGE DE ESTADO DE BOTE EN VIVO (Feedback visual inmediato para el jugador)
-        if (state.isReactionTimerRunning && !state.isReactionSessionFinished) {
-            val isDribbleReady = state.isReactionDribbleReady
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 80.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (isDribbleReady) Color(0xEE064E3B) else Color(0xEE1E293B))
-                    .border(
-                        1.5.dp,
-                        if (isDribbleReady) Color(0xFF10B981) else Color(0xFFF59E0B),
-                        RoundedCornerShape(20.dp)
-                    )
-                    .padding(horizontal = 18.dp, vertical = 7.dp)
-                    .zIndex(25f)
-            ) {
-                Text(
-                    text = if (isDribbleReady) "🏀 BOTE ACTIVO ✓" else "🏀 BOTA EL BALÓN",
-                    color = if (isDribbleReady) Color(0xFF34D399) else Color(0xFFFBBF24),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Black,
-                    letterSpacing = 0.5.sp
-                )
-            }
-        }
-
         // 1b. PANTALLA COMPLETA EN ROJO TRANSLÚCIDO SI LA POSICIÓN/DISTANCIA ES INCORRECTA (Puntuación bloqueada)
         AnimatedVisibility(
             visible = hasPositionViolation && ((state.isReactionTimerRunning && !state.isReactionSessionFinished) || state.playStartCountdownSec != null),
@@ -332,11 +305,17 @@ fun ReactionPointsHUD(
             }
         }
 
-        // 2c. Barra informativa de regla de juego (se muestra 5 segundos y luego se oculta automáticamente para no molestar)
-        var showRuleMessage by remember { mutableStateOf(true) }
-        LaunchedEffect(Unit) {
-            delay(5000L)
-            showRuleMessage = false
+        // 2c. Barra informativa de regla de juego: sale solo cuando ha empezado el juego activo y desaparece a los 5 segundos
+        var showRuleMessage by remember { mutableStateOf(false) }
+        val isGameStarted = state.isReactionTimerRunning && !state.isReactionSessionFinished
+        LaunchedEffect(isGameStarted) {
+            if (isGameStarted) {
+                showRuleMessage = true
+                delay(5000L)
+                showRuleMessage = false
+            } else {
+                showRuleMessage = false
+            }
         }
 
         AnimatedVisibility(
