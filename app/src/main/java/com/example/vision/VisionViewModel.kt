@@ -395,7 +395,9 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { 
             it.copy(
                 isAwaitingPlayStart = false,
-                playStartCountdownSec = 5
+                playStartCountdownSec = 5,
+                isReactionPlayerTooClose = false,
+                reactionPositionViolation = null
             ) 
         }
         playCountdownJob = viewModelScope.launch {
@@ -2186,63 +2188,70 @@ class VisionViewModel(application: Application) : AndroidViewModel(application) 
     private fun checkReactionPointHit(skeleton: PoseSkeleton?, ball: Det?) {
         val state = _uiState.value
         val isCheckingActive = state.isReactionPointsMode && 
-                ((state.isReactionTimerRunning && !state.isReactionSessionFinished) || state.playStartCountdownSec != null)
+                (state.isReactionTimerRunning && !state.isReactionSessionFinished && state.playStartCountdownSec == null)
         if (!isCheckingActive) return
 
         val now = System.currentTimeMillis()
 
+        // Período de gracia inicial (4 segundos tras arrancar) para permitir que el jugador se acomode y lea la regla sin mezclar alertas
+        val isInitialGracePeriod = (now - sessionStartTime < 4000L)
+
         // 0. Control riguroso de presencia y posición del jugador (Fair Play: evitar trampas y asegurar visibilidad)
         var detectedViolation: PlayerPositionViolation? = null
 
-        if (skeleton == null || skeleton.landmarks.size < 17) {
-            // No se detecta jugador o se ha salido de la pantalla
-            if (now - lastSkeletonSeenTime > 500L) {
-                detectedViolation = PlayerPositionViolation.NO_PLAYER
+        if (!isInitialGracePeriod) {
+            if (skeleton == null || skeleton.landmarks.size < 17) {
+                // No se detecta jugador o se ha salido de la pantalla
+                if (now - lastSkeletonSeenTime > 500L) {
+                    detectedViolation = PlayerPositionViolation.NO_PLAYER
+                }
+            } else {
+                lastSkeletonSeenTime = now
+                val landmarks = skeleton.landmarks
+
+                val lShoulder = landmarks.getOrNull(11)
+                val rShoulder = landmarks.getOrNull(12)
+                val hasShoulders = lShoulder != null && rShoulder != null && lShoulder.visibility > 0.35f && rShoulder.visibility > 0.35f
+                val shoulderDist = if (hasShoulders) kotlin.math.hypot(lShoulder!!.x - rShoulder!!.x, lShoulder.y - rShoulder.y) else 0f
+
+                val lEye = landmarks.getOrNull(2)
+                val rEye = landmarks.getOrNull(5)
+                val hasEyes = lEye != null && rEye != null && lEye.visibility > 0.35f && rEye.visibility > 0.35f
+                val eyeDist = if (hasEyes) kotlin.math.hypot(lEye!!.x - rEye!!.x, lEye.y - rEye.y) else 0f
+
+                val lHip = landmarks.getOrNull(23)
+                val rHip = landmarks.getOrNull(24)
+                val hasHips = (lHip != null && lHip.visibility > 0.30f) || (rHip != null && rHip.visibility > 0.30f)
+
+                val lKnee = landmarks.getOrNull(25)
+                val rKnee = landmarks.getOrNull(26)
+                val hasKnees = (lKnee != null && lKnee.visibility > 0.25f) || (rKnee != null && rKnee.visibility > 0.25f)
+
+                // Detección estricta de distancia (< 1.6m o pegado a pantalla)
+                val isTooCloseCandidate = (hasShoulders && shoulderDist > 0.26f) ||
+                        (hasEyes && eyeDist > 0.10f)
+
+                val isTooFarCandidate = hasShoulders && shoulderDist < 0.075f
+
+                // Centrado horizontal
+                val centerX = if (hasShoulders) (lShoulder!!.x + rShoulder!!.x) / 2f
+                else if (hasEyes) (lEye!!.x + rEye!!.x) / 2f else 0.5f
+
+                if (isTooCloseCandidate) {
+                    detectedViolation = PlayerPositionViolation.TOO_CLOSE
+                } else if (isTooFarCandidate) {
+                    detectedViolation = PlayerPositionViolation.TOO_FAR
+                } else if (centerX < 0.16f) {
+                    detectedViolation = PlayerPositionViolation.OFF_CENTER_LEFT
+                } else if (centerX > 0.84f) {
+                    detectedViolation = PlayerPositionViolation.OFF_CENTER_RIGHT
+                } else if (!hasShoulders || !hasHips || !hasKnees) {
+                    // Extremidades superiores e inferiores (rodillas) deben ser detectadas
+                    detectedViolation = PlayerPositionViolation.INCOMPLETE_BODY
+                }
             }
         } else {
             lastSkeletonSeenTime = now
-            val landmarks = skeleton.landmarks
-
-            val lShoulder = landmarks.getOrNull(11)
-            val rShoulder = landmarks.getOrNull(12)
-            val hasShoulders = lShoulder != null && rShoulder != null && lShoulder.visibility > 0.35f && rShoulder.visibility > 0.35f
-            val shoulderDist = if (hasShoulders) kotlin.math.hypot(lShoulder!!.x - rShoulder!!.x, lShoulder.y - rShoulder.y) else 0f
-
-            val lEye = landmarks.getOrNull(2)
-            val rEye = landmarks.getOrNull(5)
-            val hasEyes = lEye != null && rEye != null && lEye.visibility > 0.35f && rEye.visibility > 0.35f
-            val eyeDist = if (hasEyes) kotlin.math.hypot(lEye!!.x - rEye!!.x, lEye.y - rEye.y) else 0f
-
-            val lHip = landmarks.getOrNull(23)
-            val rHip = landmarks.getOrNull(24)
-            val hasHips = (lHip != null && lHip.visibility > 0.30f) || (rHip != null && rHip.visibility > 0.30f)
-
-            val lKnee = landmarks.getOrNull(25)
-            val rKnee = landmarks.getOrNull(26)
-            val hasKnees = (lKnee != null && lKnee.visibility > 0.25f) || (rKnee != null && rKnee.visibility > 0.25f)
-
-            // Detección estricta de distancia (< 1.6m o pegado a pantalla)
-            val isTooCloseCandidate = (hasShoulders && shoulderDist > 0.26f) ||
-                    (hasEyes && eyeDist > 0.10f)
-
-            val isTooFarCandidate = hasShoulders && shoulderDist < 0.075f
-
-            // Centrado horizontal
-            val centerX = if (hasShoulders) (lShoulder!!.x + rShoulder!!.x) / 2f
-            else if (hasEyes) (lEye!!.x + rEye!!.x) / 2f else 0.5f
-
-            if (isTooCloseCandidate) {
-                detectedViolation = PlayerPositionViolation.TOO_CLOSE
-            } else if (isTooFarCandidate) {
-                detectedViolation = PlayerPositionViolation.TOO_FAR
-            } else if (centerX < 0.16f) {
-                detectedViolation = PlayerPositionViolation.OFF_CENTER_LEFT
-            } else if (centerX > 0.84f) {
-                detectedViolation = PlayerPositionViolation.OFF_CENTER_RIGHT
-            } else if (!hasShoulders || !hasHips || !hasKnees) {
-                // Extremidades superiores e inferiores (rodillas) deben ser detectadas
-                detectedViolation = PlayerPositionViolation.INCOMPLETE_BODY
-            }
         }
 
         val isTooClose = (detectedViolation == PlayerPositionViolation.TOO_CLOSE)

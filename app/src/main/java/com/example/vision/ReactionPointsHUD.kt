@@ -269,9 +269,9 @@ fun ReactionPointsHUD(
             }
         }
 
-        // 1b. PANTALLA COMPLETA EN ROJO TRANSLÚCIDO SI LA POSICIÓN/DISTANCIA ES INCORRECTA (Puntuación bloqueada)
+        // 1b. PANTALLA COMPLETA EN ROJO TRANSLÚCIDO SI LA POSICIÓN/DISTANCIA ES INCORRECTA (Solo durante el juego activo)
         AnimatedVisibility(
-            visible = hasPositionViolation && ((state.isReactionTimerRunning && !state.isReactionSessionFinished) || state.playStartCountdownSec != null),
+            visible = hasPositionViolation && (state.isReactionTimerRunning && !state.isReactionSessionFinished && state.playStartCountdownSec == null),
             enter = fadeIn(tween(150)),
             exit = fadeOut(tween(200)),
             modifier = Modifier
@@ -305,7 +305,8 @@ fun ReactionPointsHUD(
             }
         }
 
-        // 2c. Barra informativa de regla de juego: sale solo cuando ha empezado el juego activo y desaparece a los 5 segundos
+        // 2c. Barra informativa de regla de juego: sale solo cuando ha empezado el juego activo y desaparece a los 5 segundos (sin borde)
+        // Se oculta automáticamente si salta la alerta de posición para que nunca se solapen los textos
         var showRuleMessage by remember { mutableStateOf(false) }
         val isGameStarted = state.isReactionTimerRunning && !state.isReactionSessionFinished
         LaunchedEffect(isGameStarted) {
@@ -318,8 +319,10 @@ fun ReactionPointsHUD(
             }
         }
 
+        val isWarningVisible = hasPositionViolation && (state.isReactionTimerRunning && !state.isReactionSessionFinished && state.playStartCountdownSec == null)
+
         AnimatedVisibility(
-            visible = showRuleMessage,
+            visible = showRuleMessage && !isWarningVisible,
             enter = fadeIn(tween(300)),
             exit = fadeOut(tween(600)),
             modifier = Modifier
@@ -330,9 +333,8 @@ fun ReactionPointsHUD(
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(20.dp))
-                    .background(Color(0xDD0F172A))
-                    .border(1.5.dp, Color(0xFF38BDF8), RoundedCornerShape(20.dp))
-                    .padding(horizontal = 18.dp, vertical = 8.dp)
+                    .background(Color(0xEE0F172A))
+                    .padding(horizontal = 20.dp, vertical = 9.dp)
             ) {
                 Text(
                     text = "🏀 BOTA EL BALÓN Y TOCA LOS PUNTOS EN ORDEN (1 ➔ 2 ➔ 3)",
