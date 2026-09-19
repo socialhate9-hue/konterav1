@@ -29,9 +29,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -45,6 +46,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,19 +65,40 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 
 /**
- * Overlay flotante minimalista sobre la cámara (sin bordes llamativos, sin neón).
+ * Estados de la detección rigurosa de posición y distancia del jugador.
+ */
+private enum class BodyPositionState {
+    NO_PERSON,
+    TOO_CLOSE,
+    TOO_FAR,
+    INCOMPLETE_BODY,
+    READY
+}
+
+/**
+ * Overlay a pantalla completa sobre la cámara activa (sin marcos cerrados ni neón).
  *
- * Características:
- * - Icono de cerrar (X) integrado dentro del popup arriba a la derecha.
- * - 3 casillas interactivas que se activan en verde de forma independiente:
- *   1. "Gira pantalla": se activa en verde al rotar a horizontal.
- *   2. "Apóyalo": se activa en verde cuando el sensor detecta que el móvil está quieto y estable.
- *   3. "Aléjate 2m": se activa en verde cuando detecta el cuerpo a ~2 metros de distancia.
- * - Sin badges redundantes ni texto sobrante.
- * - Botón "¡JUGAR AHORA!" en el azul deportivo característico (Color(0xFF2FB2C9)),
- *   habilitado en cuanto el móvil está en su orientación correcta.
+ * Flujo:
+ * 1. MÓVIL EN VERTICAL:
+ *    - Pantalla completa oscura con el icono de rotar pantalla + textos concisos.
+ *    - Botón de salir (X) situado más abajo para no solaparse con el contador.
+ *
+ * 2. MÓVIL EN HORIZONTAL (PRE-PULSACIÓN):
+ *    - Dos casillas:
+ *      1. "Gira pantalla": activada en verde (✓).
+ *      2. "Apóyalo": se activa en verde (✓) mediante acelerómetro cuando el móvil está quieto.
+ *    - Botón "¡JUGAR AHORA!" en azul deportivo: DESHABILITADO hasta que ambas casillas estén en check.
+ *    - Al pulsar el botón cuando ambas están en check: pasa al paso 3.
+ *
+ * 3. TRAS PULSAR EL BOTÓN (VERIFICACIÓN RIGUROSA DE 2M Y CUERPO ENTERO):
+ *    - Muestra la 3ª casilla: "Aléjate 2m - Cuerpo entero".
+ *    - Detección rigurosa de esqueleto: requiere cabeza, hombros, caderas y tren inferior dentro del encuadre
+ *      y a distancia óptima (~2m, ni pegado ni excesivamente lejos).
+ *    - Cuando está en posición correcta durante 800ms: la casilla se pone en verde brillante (✓),
+ *      se confirma y arranca la cuenta atrás (3, 2, 1) para empezar el juego.
  */
 @OptIn(ExperimentalAnimationApi::class)
 @Composable
@@ -96,7 +119,17 @@ fun PlayNowCountdownOverlay(
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val context = LocalContext.current
 
-    // Detección de estabilidad del teléfono (Casilla 2: "Apóyalo")
+    // Estado interno: ¿el usuario ya pulsó el botón y estamos comprobando que se coloque a 2m?
+    var isAwaitingDistanceVerification by remember { mutableStateOf(false) }
+
+    // Si se rota a vertical, reseteamos la espera de distancia
+    LaunchedEffect(isLandscape) {
+        if (!isLandscape) {
+            isAwaitingDistanceVerification = false
+        }
+    }
+
+    // 1. Detección de estabilidad del teléfono (Casilla 2: "Apóyalo")
     var isPhoneStill by remember { mutableStateOf(false) }
     DisposableEffect(context) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
@@ -138,10 +171,10 @@ fun PlayNowCountdownOverlay(
                 lastY = y
                 lastZ = z
 
-                // Umbral de estabilidad (móvil apoyado/fijo sin temblores de mano)
-                if (delta < 0.45f) {
+                // Móvil apoyado / fijo sin temblores de mano (durante al menos 350ms)
+                if (delta < 0.40f) {
                     stillDurationMs += dt
-                    if (stillDurationMs >= 400L) {
+                    if (stillDurationMs >= 350L) {
                         isPhoneStill = true
                     }
                 } else {
@@ -156,7 +189,6 @@ fun PlayNowCountdownOverlay(
         if (accelerometer != null) {
             sensorManager.registerListener(listener, accelerometer, SensorManager.SENSOR_DELAY_UI)
         } else {
-            // Si el dispositivo/emulador carece de acelerómetro, se asume estable
             isPhoneStill = true
         }
 
@@ -165,29 +197,55 @@ fun PlayNowCountdownOverlay(
         }
     }
 
-    // Detección de distancia a 2 metros (Casilla 3: "Aléjate 2m")
-    val isDistanceReady = remember(skeleton, isPlayerTooClose) {
-        if (skeleton != null && skeleton.landmarks.isNotEmpty()) {
+    // 2. Detección rigurosa de cuerpo entero a 2 metros
+    val bodyState = remember(skeleton, isPlayerTooClose) {
+        if (skeleton == null || skeleton.landmarks.isEmpty()) {
+            BodyPositionState.NO_PERSON
+        } else {
             val lShoulder = skeleton.landmarks.getOrNull(11)
             val rShoulder = skeleton.landmarks.getOrNull(12)
             val hasShoulders = lShoulder != null && rShoulder != null &&
-                    lShoulder.visibility > 0.3f && rShoulder.visibility > 0.3f
+                    lShoulder.visibility > 0.40f && rShoulder.visibility > 0.40f
+
+            val lHip = skeleton.landmarks.getOrNull(23)
+            val rHip = skeleton.landmarks.getOrNull(24)
+            val hasHips = (lHip != null && lHip.visibility > 0.35f) ||
+                    (rHip != null && rHip.visibility > 0.35f)
+
+            val lKnee = skeleton.landmarks.getOrNull(25)
+            val rKnee = skeleton.landmarks.getOrNull(26)
+            val lAnkle = skeleton.landmarks.getOrNull(27)
+            val rAnkle = skeleton.landmarks.getOrNull(28)
+            val hasLowerBody = (lKnee != null && lKnee.visibility > 0.28f) ||
+                    (rKnee != null && rKnee.visibility > 0.28f) ||
+                    (lAnkle != null && lAnkle.visibility > 0.22f) ||
+                    (rAnkle != null && rAnkle.visibility > 0.22f)
+
             val shoulderDist = if (hasShoulders) {
                 kotlin.math.hypot(lShoulder!!.x - rShoulder!!.x, lShoulder.y - rShoulder.y)
             } else 0f
 
-            val lHip = skeleton.landmarks.getOrNull(23)
-            val rHip = skeleton.landmarks.getOrNull(24)
-            val hasHips = lHip != null && rHip != null &&
-                    (lHip.visibility > 0.3f || rHip.visibility > 0.3f)
+            if (isPlayerTooClose || (hasShoulders && shoulderDist > 0.27f)) {
+                BodyPositionState.TOO_CLOSE
+            } else if (hasShoulders && shoulderDist < 0.075f) {
+                BodyPositionState.TOO_FAR
+            } else if (!hasShoulders || !hasHips || !hasLowerBody) {
+                BodyPositionState.INCOMPLETE_BODY
+            } else {
+                BodyPositionState.READY
+            }
+        }
+    }
 
-            // A 2 metros de distancia, el cuerpo se detecta completo y no está pegado a la cámara
-            (!isPlayerTooClose) && (
-                (hasShoulders && shoulderDist in 0.04f..0.32f) ||
-                (hasHips && (!hasShoulders || shoulderDist <= 0.34f))
-            )
-        } else {
-            false
+    // Temporizador de estabilidad: una vez en posición correcta durante 800ms, lanza el juego
+    LaunchedEffect(isAwaitingDistanceVerification, bodyState) {
+        if (isAwaitingDistanceVerification && bodyState == BodyPositionState.READY) {
+            delay(800)
+            if (bodyState == BodyPositionState.READY) {
+                VoiceCoachManager.speak("¡Listo!", pitch = 1.3f, rate = 1.25f)
+                isAwaitingDistanceVerification = false
+                onPlayNow()
+            }
         }
     }
 
@@ -240,178 +298,310 @@ fun PlayNowCountdownOverlay(
                 }
             }
         } else if (isAwaitingPlayStart) {
-            // Fondo semitransparente sutil sin líneas de borde
+            // Fondo oscuro opaco a pantalla completa sobre la cámara activa
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0x55000000))
-                    .testTag("awaiting_play_start_overlay"),
-                contentAlignment = Alignment.Center
+                    .background(Color(0xC4000000))
+                    .testTag("awaiting_play_start_overlay")
             ) {
-                // Popup flotante limpio, sutil y sin contorno
-                Column(
+                // Botón de salir / cerrar (X) ubicado por debajo del contador superior
+                val topPadding = if (!isLandscape) 78.dp else 60.dp
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth(0.92f)
-                        .widthIn(max = 460.dp)
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(Color(0xE6111827))
-                        .padding(horizontal = 18.dp, vertical = 18.dp)
-                        .testTag("minimal_setup_popup"),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                        .align(Alignment.TopEnd)
+                        .padding(top = topPadding, end = 20.dp)
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x33FFFFFF))
+                        .clickable {
+                            isAwaitingDistanceVerification = false
+                            onExitToMain()
+                        }
+                        .testTag("exit_play_now_to_main_button"),
+                    contentAlignment = Alignment.Center
                 ) {
-                    // Cabecera con título y botón de cierre dentro del popup a la derecha
-                    Box(
-                        modifier = Modifier.fillMaxWidth()
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Cerrar y volver al inicio",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                if (!isLandscape) {
+                    // ==========================================
+                    // PASO 1: MÓVIL EN VERTICAL
+                    // Solo el icono de rotar pantalla + texto
+                    // ==========================================
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 28.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
                     ) {
-                        Text(
-                            text = "COLOCA EL MÓVIL",
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = 1.sp,
-                            color = Color.White,
-                            modifier = Modifier.align(Alignment.Center)
+                        val infiniteTransition = rememberInfiniteTransition(label = "rotation_icon_pulse")
+                        val iconScale by infiniteTransition.animateFloat(
+                            initialValue = 1.0f,
+                            targetValue = 1.08f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(durationMillis = 800, easing = FastOutSlowInEasing),
+                                repeatMode = RepeatMode.Reverse
+                            ),
+                            label = "rotation_scale"
                         )
 
-                        // Botón de salir dentro del popup a la derecha arriba
                         Box(
                             modifier = Modifier
-                                .align(Alignment.CenterEnd)
-                                .size(34.dp)
+                                .size(110.dp)
+                                .scale(iconScale)
                                 .clip(CircleShape)
-                                .background(Color(0x22FFFFFF))
-                                .clickable { onExitToMain() }
-                                .testTag("exit_play_now_to_main_button"),
+                                .background(Color(0x26FFFFFF)),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Cerrar",
-                                tint = Color(0xCCFFFFFF),
-                                modifier = Modifier.size(18.dp)
+                                imageVector = Icons.Default.ScreenRotation,
+                                contentDescription = "Girar pantalla en horizontal",
+                                tint = Color.White,
+                                modifier = Modifier.size(60.dp)
                             )
                         }
-                    }
 
-                    // Fila de 3 casillas interactivas: se activan en verde según cada acción
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        Spacer(modifier = Modifier.height(28.dp))
+
+                        Text(
+                            text = "COLOCA EL MÓVIL",
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 1.5.sp,
+                            color = Color.White,
+                            textAlign = TextAlign.Center
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = "Gira la pantalla en horizontal",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color(0xFFCBD5E1),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                } else if (!isAwaitingDistanceVerification) {
+                    // ==========================================
+                    // PASO 2: MÓVIL EN HORIZONTAL (PRE-PULSACIÓN)
+                    // 2 casillas + botón bloqueado hasta cumplir ambas
+                    // ==========================================
+                    val isReadyToPress = isLandscape && isPhoneStill
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 24.dp, vertical = 20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
                     ) {
-                        // Casilla 1: Gira pantalla (se activa en verde al rotar a horizontal)
-                        SetupStepBox(
-                            modifier = Modifier.weight(1f),
-                            icon = Icons.Default.ScreenRotation,
-                            title = "Gira pantalla",
-                            subtitle = if (isLandscape) "Listo" else "Horizontal",
-                            isActivated = isLandscape,
-                            tag = "step_box_rotation"
+                        Text(
+                            text = "COLOCA EL MÓVIL",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 1.5.sp,
+                            color = Color.White,
+                            textAlign = TextAlign.Center
                         )
 
-                        // Casilla 2: Apóyalo (se activa en verde cuando el móvil está fijo y no se mueve)
-                        SetupStepBox(
-                            modifier = Modifier.weight(1f),
-                            icon = Icons.Default.Smartphone,
-                            title = "Apóyalo",
-                            subtitle = if (isPhoneStill) "Fijo" else "Suelo o mesa",
-                            isActivated = isPhoneStill,
-                            tag = "step_box_still"
-                        )
+                        Spacer(modifier = Modifier.height(20.dp))
 
-                        // Casilla 3: Aléjate 2m (se activa en verde al colocarse a 2 metros de distancia)
-                        SetupStepBox(
-                            modifier = Modifier.weight(1f),
-                            icon = Icons.Default.Person,
-                            title = "Aléjate 2m",
-                            subtitle = if (isDistanceReady) "Cuerpo entero" else "2 metros",
-                            isActivated = isDistanceReady,
-                            tag = "step_box_distance"
-                        )
-                    }
-
-                    // Botón "¡JUGAR AHORA!" en el azul deportivo original (Color(0xFF2FB2C9))
-                    val blueGradient = Brush.horizontalGradient(
-                        listOf(
-                            Color(0xFF2FB2C9),
-                            Color(0xFF0F869B)
-                        )
-                    )
-
-                    if (isLandscape) {
-                        // Habilitado en cuanto el móvil está en su posición correcta (horizontal)
-                        val infiniteTransition = rememberInfiniteTransition(label = "btn_ready_pulse")
-                        val pulseScale by infiniteTransition.animateFloat(
-                            initialValue = 1.0f,
-                            targetValue = 1.04f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(durationMillis = 700, easing = FastOutSlowInEasing),
-                                repeatMode = RepeatMode.Reverse
-                            ),
-                            label = "btn_ready_pulse_scale"
-                        )
-
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .scale(pulseScale)
-                                .shadow(8.dp, RoundedCornerShape(16.dp), ambientColor = Color(0x662FB2C9), spotColor = Color(0x880F869B))
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(blueGradient)
-                                .clickable { onPlayNow() }
-                                .padding(vertical = 15.dp)
-                                .testTag("play_now_button"),
-                            contentAlignment = Alignment.Center
+                        // Fila con las 2 casillas de preparación
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(26.dp)
-                                )
-                                Text(
-                                    text = if (isGameMode) "¡JUGAR AHORA!" else "¡ENTRENAR AHORA!",
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Black,
-                                    letterSpacing = 1.sp,
-                                    color = Color.White
-                                )
-                            }
+                            // Casilla 1: Gira pantalla (ya en horizontal -> ✓ verde)
+                            FloatingCheckItem(
+                                icon = Icons.Default.ScreenRotation,
+                                title = "Gira pantalla",
+                                subtitle = "Listo",
+                                isActivated = true,
+                                tag = "step_box_rotation"
+                            )
+
+                            // Casilla 2: Apóyalo (acelerómetro quieto -> ✓ verde)
+                            FloatingCheckItem(
+                                icon = Icons.Default.Smartphone,
+                                title = "Apóyalo",
+                                subtitle = if (isPhoneStill) "Fijo" else "Suelo o mesa",
+                                isActivated = isPhoneStill,
+                                tag = "step_box_still"
+                            )
                         }
-                    } else {
-                        // Bloqueado hasta girar el móvil a horizontal
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(Color(0x1FFFFFFF))
-                                .padding(vertical = 15.dp)
-                                .testTag("play_now_disabled_button"),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.ScreenRotation,
-                                    contentDescription = null,
-                                    tint = Color(0x88FFFFFF),
-                                    modifier = Modifier.size(20.dp)
+
+                        Spacer(modifier = Modifier.height(28.dp))
+
+                        // Botón "¡JUGAR AHORA!": DESHABILITADO hasta que las 2 casillas estén en check
+                        if (isReadyToPress) {
+                            val infiniteTransition = rememberInfiniteTransition(label = "btn_bouncer")
+                            val bounceScale by infiniteTransition.animateFloat(
+                                initialValue = 1.0f,
+                                targetValue = 1.06f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(durationMillis = 650, easing = FastOutSlowInEasing),
+                                    repeatMode = RepeatMode.Reverse
+                                ),
+                                label = "bouncer_scale"
+                            )
+                            val bounceOffsetY by infiniteTransition.animateFloat(
+                                initialValue = 0f,
+                                targetValue = -4f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(durationMillis = 650, easing = FastOutSlowInEasing),
+                                    repeatMode = RepeatMode.Reverse
+                                ),
+                                label = "bouncer_offset_y"
+                            )
+
+                            val buttonGradient = Brush.horizontalGradient(
+                                listOf(
+                                    Color(0xFF2FB2C9),
+                                    Color(0xFF0F869B)
                                 )
+                            )
+
+                            Box(
+                                modifier = Modifier
+                                    .offset(y = bounceOffsetY.dp)
+                                    .scale(bounceScale)
+                                    .shadow(
+                                        elevation = 16.dp,
+                                        shape = RoundedCornerShape(50),
+                                        ambientColor = Color(0x662FB2C9),
+                                        spotColor = Color(0x990F869B)
+                                    )
+                                    .clip(RoundedCornerShape(50))
+                                    .background(buttonGradient)
+                                    .clickable {
+                                        VoiceCoachManager.speak(
+                                            "¡Aléjate a tu posición!",
+                                            pitch = 1.22f,
+                                            rate = 1.2f
+                                        )
+                                        isAwaitingDistanceVerification = true
+                                    }
+                                    .padding(horizontal = 38.dp, vertical = 18.dp)
+                                    .testTag("play_now_button"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Text(
+                                        text = if (isGameMode) "¡JUGAR AHORA!" else "¡ENTRENAR AHORA!",
+                                        fontSize = 17.sp,
+                                        fontWeight = FontWeight.Black,
+                                        letterSpacing = 1.2.sp,
+                                        color = Color.White
+                                    )
+                                }
+                            }
+                        } else {
+                            // Modo no activo / deshabilitado hasta apoyar el móvil
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(Color(0x1AFFFFFF))
+                                    .padding(horizontal = 32.dp, vertical = 16.dp)
+                                    .testTag("play_now_disabled_button"),
+                                contentAlignment = Alignment.Center
+                            ) {
                                 Text(
-                                    text = "GIRA EL MÓVIL PARA JUGAR",
+                                    text = "APOYA EL MÓVIL PARA JUGAR",
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold,
                                     letterSpacing = 0.5.sp,
-                                    color = Color(0x88FFFFFF)
+                                    color = Color(0x77FFFFFF)
                                 )
                             }
                         }
+                    }
+                } else {
+                    // ==========================================
+                    // PASO 3: TRAS PULSAR EL BOTÓN
+                    // Verificación rigurosa de 2 metros y cuerpo entero
+                    // ==========================================
+                    val isBodyReady = bodyState == BodyPositionState.READY
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 24.dp, vertical = 20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = "COLÓCATE A 2 METROS",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 1.5.sp,
+                            color = Color.White,
+                            textAlign = TextAlign.Center
+                        )
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        // Casilla grande de los 2 metros
+                        FloatingCheckItem(
+                            icon = Icons.Default.Person,
+                            title = "Aléjate 2m",
+                            subtitle = if (isBodyReady) "¡En posición!" else "Cuerpo entero",
+                            isActivated = isBodyReady,
+                            tag = "step_box_distance",
+                            customWidth = 150.dp
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Mensaje de estado dinámico riguroso
+                        val statusText = when (bodyState) {
+                            BodyPositionState.NO_PERSON -> "Ponte delante de la cámara"
+                            BodyPositionState.TOO_CLOSE -> "Demasiado cerca, da un paso atrás"
+                            BodyPositionState.TOO_FAR -> "Demasiado lejos, acércate un poco"
+                            BodyPositionState.INCOMPLETE_BODY -> "Se debe ver el cuerpo entero (cabeza a pies)"
+                            BodyPositionState.READY -> "¡Posición perfecta! Mantente ahí..."
+                        }
+
+                        Text(
+                            text = statusText,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isBodyReady) Color(0xFF86EFAC) else Color(0xFFCBD5E1),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(22.dp))
+
+                        // Botón de salto de seguridad si la habitación es muy pequeña o iluminación difícil
+                        Text(
+                            text = "¿Listo? Toca aquí para empezar ya",
+                            fontSize = 12.sp,
+                            color = Color(0x88FFFFFF),
+                            modifier = Modifier
+                                .clickable {
+                                    isAwaitingDistanceVerification = false
+                                    onPlayNow()
+                                }
+                                .padding(8.dp)
+                                .testTag("force_start_play_button")
+                        )
                     }
                 }
             }
@@ -420,26 +610,25 @@ fun PlayNowCountdownOverlay(
 }
 
 /**
- * Casilla de paso interactiva:
- * - Cuando la acción se cumple, se ilumina en verde con icono de check.
- * - Diseño limpio, sin bordes llamativos.
+ * Item de check flotante sobre el fondo oscuro de pantalla completa.
  */
 @Composable
-private fun SetupStepBox(
-    modifier: Modifier = Modifier,
+private fun FloatingCheckItem(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
     subtitle: String,
     isActivated: Boolean,
-    tag: String
+    tag: String,
+    customWidth: androidx.compose.ui.unit.Dp = 120.dp
 ) {
     Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
+        modifier = Modifier
+            .width(customWidth)
+            .clip(RoundedCornerShape(20.dp))
             .background(
-                if (isActivated) Color(0x3316A34A) else Color(0x14FFFFFF)
+                if (isActivated) Color(0x3316A34A) else Color(0x22FFFFFF)
             )
-            .padding(vertical = 12.dp, horizontal = 6.dp)
+            .padding(vertical = 12.dp, horizontal = 8.dp)
             .testTag(tag),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -449,21 +638,21 @@ private fun SetupStepBox(
                 .size(46.dp)
                 .clip(CircleShape)
                 .background(
-                    if (isActivated) Color(0x3322C55E) else Color(0x1AFFFFFF)
+                    if (isActivated) Color(0x3322C55E) else Color(0x1EFFFFFF)
                 ),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = if (isActivated) Icons.Default.Check else icon,
                 contentDescription = null,
-                tint = if (isActivated) Color(0xFF22C55E) else Color(0xCCFFFFFF),
+                tint = if (isActivated) Color(0xFF22C55E) else Color.White,
                 modifier = Modifier.size(24.dp)
             )
         }
 
         Text(
             text = title,
-            fontSize = 11.5.sp,
+            fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             color = if (isActivated) Color(0xFF86EFAC) else Color.White,
             textAlign = TextAlign.Center
@@ -471,7 +660,7 @@ private fun SetupStepBox(
 
         Text(
             text = subtitle,
-            fontSize = 10.sp,
+            fontSize = 10.5.sp,
             fontWeight = if (isActivated) FontWeight.Bold else FontWeight.Normal,
             color = if (isActivated) Color(0xFF4ADE80) else Color(0xFF94A3B8),
             textAlign = TextAlign.Center
